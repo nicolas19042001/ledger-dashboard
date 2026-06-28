@@ -2,11 +2,14 @@ import React, { useState, useEffect, useMemo } from "react";
 import { Plus, Trash2, TrendingUp, AlertTriangle, Briefcase, Building2, Store, Users, Euro, Clock } from "lucide-react";
 
 const MONTHS_DE = ["Januar","Februar","März","April","Mai","Juni","Juli","August","September","Oktober","November","Dezember"];
+const WEEKDAYS_DE = ["So","Mo","Di","Mi","Do","Fr","Sa"];
 const MINIJOB_GRENZE = 603;
 
 function uid() { return Math.random().toString(36).slice(2, 10); }
 function fmtEUR(n) { return new Intl.NumberFormat("de-DE", { style: "currency", currency: "EUR" }).format(n || 0); }
 function monthKey(y, m) { return `${y}-${String(m + 1).padStart(2, "0")}`; }
+function daysInMonth(y, m) { return new Date(y, m + 1, 0).getDate(); }
+function todayStr() { return new Date().toISOString().slice(0,10); }
 function hoursBetween(from, to) {
   if (!from || !to) return 0;
   const [fh, fm] = from.split(":").map(Number);
@@ -15,40 +18,58 @@ function hoursBetween(from, to) {
   if (mins < 0) mins += 24 * 60;
   return mins / 60;
 }
+function weekdayOf(dateStr) {
+  if (!dateStr) return "";
+  const d = new Date(dateStr + "T00:00:00");
+  return WEEKDAYS_DE[d.getDay()] || "";
+}
+// Overlap (in Tagen) eines Datumsbereichs mit dem gewählten Monat
+function overlapDaysInMonth(from, to, y, m) {
+  const dim = daysInMonth(y, m);
+  if (!from || !to) return { days: 0, dim };
+  const mStart = new Date(y, m, 1).getTime();
+  const mEnd = new Date(y, m, dim).getTime();
+  const s0 = new Date(from + "T00:00:00").getTime();
+  const e0 = new Date(to + "T00:00:00").getTime();
+  const s = Math.max(s0, mStart);
+  const e = Math.min(e0, mEnd);
+  if (s > e) return { days: 0, dim };
+  const days = Math.floor((e - s) / 86400000) + 1;
+  return { days, dim };
+}
+function dateInRange(ref, from, to) {
+  if (!from || !to) return false;
+  return from <= ref && ref <= to;
+}
 
-// --- localStorage helpers (synchron, funktioniert im normalen Browser) ---
 function load(key, fallback) {
-  try {
-    const raw = localStorage.getItem(key);
-    return raw != null ? JSON.parse(raw) : fallback;
-  } catch { return fallback; }
+  try { const raw = localStorage.getItem(key); return raw != null ? JSON.parse(raw) : fallback; }
+  catch { return fallback; }
 }
-function persist(key, val) {
-  try { localStorage.setItem(key, JSON.stringify(val)); } catch { /* ignore */ }
-}
+function persist(key, val) { try { localStorage.setItem(key, JSON.stringify(val)); } catch {} }
 
 export default function Dashboard() {
-  // Hauptarbeit (Festanstellung)
-  const [mainSalary, setMainSalary] = useState(() => load("v4_mainSalary", 0));
-  const [mainWeeklyHours, setMainWeeklyHours] = useState(() => load("v4_mainWeeklyHours", 38));
+  // Hauptarbeit
+  const [mainSalary, setMainSalary] = useState(() => load("v5_mainSalary", 0));
+  const [mainWeeklyHours, setMainWeeklyHours] = useState(() => load("v5_mainWeeklyHours", 38));
   // Minijob
-  const [minijobRate, setMinijobRate] = useState(() => load("v4_minijobRate", 13));
-  const [minijobEntries, setMinijobEntries] = useState(() => load("v4_minijobEntries", []));
-  // Kleingewerbe (Klienten)
-  const [clients, setClients] = useState(() => load("v4_clients", []));
-  const [bizHours, setBizHours] = useState(() => load("v4_bizHours", {}));
+  const [minijobRate, setMinijobRate] = useState(() => load("v5_minijobRate", 13));
+  const [minijobEntries, setMinijobEntries] = useState(() => load("v5_minijobEntries", []));
+  // Kleingewerbe
+  const [bizPeriods, setBizPeriods] = useState(() => load("v6_bizPeriods", [])); // {id,from,to,count,price}
+  const [bizEntries, setBizEntries] = useState(() => load("v5_bizEntries", []));   // {id,date,from,to}
 
   const [view, setView] = useState("haupt");
   const [now] = useState(new Date());
   const [selMonth, setSelMonth] = useState(now.getMonth());
   const [selYear, setSelYear] = useState(now.getFullYear());
 
-  useEffect(() => persist("v4_mainSalary", mainSalary), [mainSalary]);
-  useEffect(() => persist("v4_mainWeeklyHours", mainWeeklyHours), [mainWeeklyHours]);
-  useEffect(() => persist("v4_minijobRate", minijobRate), [minijobRate]);
-  useEffect(() => persist("v4_minijobEntries", minijobEntries), [minijobEntries]);
-  useEffect(() => persist("v4_clients", clients), [clients]);
-  useEffect(() => persist("v4_bizHours", bizHours), [bizHours]);
+  useEffect(() => persist("v5_mainSalary", mainSalary), [mainSalary]);
+  useEffect(() => persist("v5_mainWeeklyHours", mainWeeklyHours), [mainWeeklyHours]);
+  useEffect(() => persist("v5_minijobRate", minijobRate), [minijobRate]);
+  useEffect(() => persist("v5_minijobEntries", minijobEntries), [minijobEntries]);
+  useEffect(() => persist("v6_bizPeriods", bizPeriods), [bizPeriods]);
+  useEffect(() => persist("v5_bizEntries", bizEntries), [bizEntries]);
 
   const mk = monthKey(selYear, selMonth);
 
@@ -58,20 +79,37 @@ export default function Dashboard() {
 
   // Minijob
   const mini = useMemo(() => {
-    const list = minijobEntries.filter(e => e.date.slice(0,7) === mk);
+    const list = minijobEntries.filter(e => e.date.slice(0,7) === mk).sort((a,b)=>b.date.localeCompare(a.date));
     const hours = list.reduce((s,e) => s + hoursBetween(e.from, e.to), 0);
     const pay = hours * Number(minijobRate || 0);
     return { list, hours, pay, over: pay > MINIJOB_GRENZE, near: pay > MINIJOB_GRENZE*0.85 && pay <= MINIJOB_GRENZE };
   }, [minijobEntries, minijobRate, mk]);
 
   // Kleingewerbe
-  const bizTotal = clients.reduce((s,c) => s + Number(c.rate || 0), 0);
-  const clientCount = clients.length;
-  const bHours = Number(bizHours[mk] || 0);
-  const bizRate = bHours > 0 ? bizTotal / bHours : 0;
+  const biz = useMemo(() => {
+    // Zeiträume, die in den gewählten Monat fallen, mit anteiligem Betrag
+    const periodsInMonth = bizPeriods.map(p => {
+      const { days, dim } = overlapDaysInMonth(p.from, p.to, selYear, selMonth);
+      const amount = Number(p.count||0) * Number(p.price||0) * (dim>0 ? days/dim : 0);
+      return { ...p, days, dim, amount };
+    });
+    const income = periodsInMonth.reduce((s,p) => s + p.amount, 0);
 
-  const grandPay = Number(mainSalary||0) + mini.pay + bizTotal;
-  const grandHours = mainMonthlyHours + mini.hours + bHours;
+    // "Aktuelle" Klienten: Zeitraum, der das Referenzdatum enthält
+    const isCurrentMonth = selYear === now.getFullYear() && selMonth === now.getMonth();
+    const ref = isCurrentMonth ? todayStr() : `${mk}-${String(daysInMonth(selYear,selMonth)).padStart(2,"0")}`;
+    const activeP = bizPeriods.find(p => dateInRange(ref, p.from, p.to));
+    const currentCount = activeP ? Number(activeP.count||0) : 0;
+
+    const list = bizEntries.filter(e => e.date.slice(0,7) === mk).sort((a,b)=>b.date.localeCompare(a.date));
+    const hours = list.reduce((s,e) => s + hoursBetween(e.from, e.to), 0);
+    const avgRate = hours > 0 ? income / hours : 0;
+
+    return { periodsInMonth, income, currentCount, list, hours, avgRate };
+  }, [bizPeriods, bizEntries, selYear, selMonth, mk, now]);
+
+  const grandPay = Number(mainSalary||0) + mini.pay + biz.income;
+  const grandHours = mainMonthlyHours + mini.hours + biz.hours;
 
   const history = useMemo(() => {
     const out = [];
@@ -80,20 +118,29 @@ export default function Dashboard() {
       while (m < 0) { m += 12; y -= 1; }
       const k = monthKey(y, m);
       const mjPay = minijobEntries.filter(e=>e.date.slice(0,7)===k).reduce((s,e)=>s+hoursBetween(e.from,e.to),0) * Number(minijobRate||0);
-      out.push({ key:k, label: MONTHS_DE[m].slice(0,3), total: Number(mainSalary||0) + mjPay + bizTotal });
+      const bPay = bizPeriods.reduce((s,p) => {
+        const { days, dim } = overlapDaysInMonth(p.from, p.to, y, m);
+        return s + Number(p.count||0) * Number(p.price||0) * (dim>0 ? days/dim : 0);
+      }, 0);
+      out.push({ key:k, label: MONTHS_DE[m].slice(0,3), total: Number(mainSalary||0) + mjPay + bPay });
     }
     return out;
-  }, [mainSalary, minijobEntries, minijobRate, bizTotal, selMonth, selYear]);
+  }, [mainSalary, minijobEntries, minijobRate, bizPeriods, selMonth, selYear]);
   const maxHist = Math.max(1, ...history.map(h => h.total));
 
   // mutators
-  const addME = () => setMinijobEntries([...minijobEntries, { id:uid(), date:new Date().toISOString().slice(0,10), from:"09:00", to:"13:00" }]);
+  const addME = () => setMinijobEntries([{ id:uid(), date:todayStr(), from:"09:00", to:"13:00" }, ...minijobEntries]);
   const updME = (id,p) => setMinijobEntries(minijobEntries.map(e=>e.id===id?{...e,...p}:e));
   const delME = (id) => setMinijobEntries(minijobEntries.filter(e=>e.id!==id));
-  const addClient = () => setClients([...clients, { id: uid(), name: "", rate: 0 }]);
-  const updClient = (id, p) => setClients(clients.map(c => c.id===id ? {...c,...p} : c));
-  const delClient = (id) => setClients(clients.filter(c=>c.id!==id));
-  const setBHours = (val) => setBizHours({ ...bizHours, [mk]: val });
+  const addBE = () => setBizEntries([{ id:uid(), date:todayStr(), from:"09:00", to:"11:00" }, ...bizEntries]);
+  const updBE = (id,p) => setBizEntries(bizEntries.map(e=>e.id===id?{...e,...p}:e));
+  const delBE = (id) => setBizEntries(bizEntries.filter(e=>e.id!==id));
+  const addPeriod = () => {
+    const dim = daysInMonth(selYear, selMonth);
+    setBizPeriods([{ id:uid(), from:`${mk}-01`, to:`${mk}-${String(dim).padStart(2,"0")}`, count:0, price:0 }, ...bizPeriods]);
+  };
+  const updPeriod = (id,p) => setBizPeriods(bizPeriods.map(x=>x.id===id?{...x,...p}:x));
+  const delPeriod = (id) => setBizPeriods(bizPeriods.filter(x=>x.id!==id));
 
   return (
     <div style={S.app}>
@@ -111,6 +158,13 @@ export default function Dashboard() {
           <select value={selYear} onChange={e=>setSelYear(+e.target.value)} style={S.select}>
             {[now.getFullYear()-1, now.getFullYear(), now.getFullYear()+1].map(y=><option key={y} value={y}>{y}</option>)}
           </select>
+        </div>
+        <div style={S.headerSummary}>
+          <span className="num">{fmtEUR(grandPay)}</span>
+          <span style={{ color:"#5a6356" }}>·</span>
+          <span className="num" style={{ color:"#7d8a78" }}>{grandHours.toFixed(1)} h</span>
+          <span style={{ color:"#5a6356" }}>·</span>
+          <span className="num" style={{ color:"#7d8a78" }}>{grandHours>0?`${(grandPay/grandHours).toFixed(2)} €/h`:"–"}</span>
         </div>
       </header>
 
@@ -134,7 +188,12 @@ export default function Dashboard() {
 
         {view === "haupt" && (
           <>
-            <SectionHint text="Deine Festanstellung: festes Monatsgehalt, unabhängig von Klienten." />
+            <SectionHint text="Deine Festanstellung: festes Monatsgehalt, unabhängig vom Gewerbe." />
+            <div style={S.statStrip}>
+              <Stat icon={Euro} label="Gehalt / Monat" value={fmtEUR(Number(mainSalary||0))} accent="#e8a23a" />
+              <Stat icon={Clock} label="Stunden / Monat" value={`${mainMonthlyHours.toFixed(0)} h`} accent="#cfd6c8" />
+              <Stat icon={TrendingUp} label="Stundenlohn" value={mainRate>0?`${mainRate.toFixed(2)} €/h`:"–"} accent="#8fae7a" />
+            </div>
             <div style={S.card}>
               <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:10 }}>
                 <Field label="Festgehalt / Monat (€)">
@@ -144,11 +203,7 @@ export default function Dashboard() {
                   <input type="number" step="1" value={mainWeeklyHours||""} onChange={e=>setMainWeeklyHours(+e.target.value)} style={S.input}/>
                 </Field>
               </div>
-              <div style={S.calcBox}>
-                <span className="num" style={{ color:"#7d8a78", fontSize:13 }}>≈ {mainMonthlyHours.toFixed(0)} h/Monat</span>
-                <span className="num" style={{ color:"#8fae7a", fontSize:18, fontWeight:600 }}>{mainRate>0?`${mainRate.toFixed(2)} €/h`:"–"}</span>
-              </div>
-              <div style={{ fontSize:11.5, color:"#5a6356", marginTop:8 }}>Monatsstunden grob aus Wochenstunden × 4,33 geschätzt.</div>
+              <div style={{ fontSize:11.5, color:"#5a6356", marginTop:10 }}>Monatsstunden grob aus Wochenstunden × 4,33 geschätzt.</div>
             </div>
           </>
         )}
@@ -156,12 +211,17 @@ export default function Dashboard() {
         {view === "minijob" && (
           <>
             <SectionHint text="Stundenbasierter Nebenjob. Trage einzelne Arbeitstage mit Uhrzeit ein." />
+            <div style={S.statStrip}>
+              <Stat icon={Euro} label="Verdienst" value={fmtEUR(mini.pay)} accent="#e8a23a" />
+              <Stat icon={Clock} label="Stunden" value={`${mini.hours.toFixed(1)} h`} accent="#cfd6c8" />
+              <Stat icon={TrendingUp} label="Stundenlohn" value={`${Number(minijobRate||0).toFixed(2)} €/h`} accent="#6f9bd1" />
+            </div>
             <div style={S.card}>
               <Field label="Stundenlohn (€)">
                 <input type="number" value={minijobRate} step="0.5" onChange={e=>setMinijobRate(+e.target.value)} style={S.input}/>
               </Field>
-              <div className="num" style={{ marginTop:12, fontSize:14, color: mini.over?"#e07a5f":"#6f9bd1" }}>
-                {MONTHS_DE[selMonth]}: {mini.hours.toFixed(2)} h · {fmtEUR(mini.pay)} / {fmtEUR(MINIJOB_GRENZE)}
+              <div className="num" style={{ marginTop:12, fontSize:13.5, color: mini.over?"#e07a5f":"#6f9bd1" }}>
+                {fmtEUR(mini.pay)} von {fmtEUR(MINIJOB_GRENZE)} Minijob-Grenze
               </div>
               <div style={S.barTrack}>
                 <div style={{ ...S.barFill, width:`${Math.min(100,(mini.pay/MINIJOB_GRENZE)*100)}%`, background: mini.over?"#e07a5f":"#6f9bd1" }}/>
@@ -174,7 +234,7 @@ export default function Dashboard() {
               )}
             </div>
             <SubHead text={`Arbeitstage · ${MONTHS_DE[selMonth]}`} />
-            {mini.list.length===0 && <div style={{ color:"#7d8a78", fontSize:13, padding:"8px 0 12px" }}>Noch keine Tage eingetragen.</div>}
+            {mini.list.length===0 && <Empty text="Noch keine Tage eingetragen." />}
             {mini.list.map(e => <TimeRow key={e.id} e={e} upd={updME} del={delME} />)}
             <button onClick={addME} style={S.btnAdd}><Plus size={14}/> Arbeitstag eintragen</button>
           </>
@@ -182,45 +242,58 @@ export default function Dashboard() {
 
         {view === "gewerbe" && (
           <>
-            <SectionHint text="Deine Klientenarbeit. Bezahlung pro Klient pro Monat." />
+            <SectionHint text="Klienten als Zeiträume erfassen – ändert sich die Anzahl im Monat, lege einfach mehrere Zeiträume an. Beträge werden anteilig nach Tagen berechnet." />
             <div style={S.statStrip}>
-              <Stat icon={Users} label="Klienten" value={`${clientCount}`} accent="#8fae7a" />
-              <Stat icon={Euro} label="Einnahmen / Monat" value={fmtEUR(bizTotal)} accent="#e8a23a" />
-              <Stat icon={Clock} label="Stunden" value={`${bHours.toFixed(1)} h`} accent="#cfd6c8" />
-              <Stat icon={TrendingUp} label="Stundenlohn" value={bizRate>0?`${bizRate.toFixed(2)} €/h`:"–"} accent="#6f9bd1" />
+              <Stat icon={Users} label="Aktuelle Klienten" value={`${biz.currentCount}`} accent="#8fae7a" />
+              <Stat icon={Euro} label="Einnahmen" value={fmtEUR(biz.income)} accent="#e8a23a" />
+              <Stat icon={Clock} label="Stunden" value={`${biz.hours.toFixed(1)} h`} accent="#cfd6c8" />
+              <Stat icon={TrendingUp} label="Ø Stundenlohn" value={biz.avgRate>0?`${biz.avgRate.toFixed(2)} €/h`:"–"} accent="#6f9bd1" />
             </div>
 
-            <div style={S.tableWrap}>
-              <div style={{...S.trow, ...S.thead}}>
-                <span style={S.colName}>Klient</span>
-                <span style={S.colRate}>€ / Monat</span>
-                <span style={S.colDel}></span>
-              </div>
-              {clients.length===0 && <div style={{ padding:"20px 14px", color:"#7d8a78", fontSize:13.5, textAlign:"center" }}>Noch keine Klienten. Füge deinen ersten hinzu.</div>}
-              {clients.map(c => (
-                <div key={c.id} style={S.trow}>
-                  <input placeholder="Name" value={c.name} onChange={e=>updClient(c.id,{name:e.target.value})} style={{...S.cellInput, ...S.colName}}/>
-                  <input type="number" placeholder="0" value={c.rate||""} onChange={e=>updClient(c.id,{rate:+e.target.value})} style={{...S.cellInput, ...S.colRate, textAlign:"right"}} className="num"/>
-                  <button onClick={()=>delClient(c.id)} style={{...S.btnGhost, ...S.colDel}}><Trash2 size={15}/></button>
+            <SubHead text="Klienten-Zeiträume" />
+            {biz.periodsInMonth.length===0 && <Empty text="Noch keine Zeiträume. Lege deinen ersten an." />}
+            {biz.periodsInMonth.map(p => (
+              <div key={p.id} style={S.card}>
+                <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:8, marginBottom:8 }}>
+                  <Field label="Von"><input type="date" value={p.from} onChange={e=>updPeriod(p.id,{from:e.target.value})} style={S.input}/></Field>
+                  <Field label="Bis"><input type="date" value={p.to} onChange={e=>updPeriod(p.id,{to:e.target.value})} style={S.input}/></Field>
                 </div>
-              ))}
-              <div style={{...S.trow, ...S.tfoot}}>
-                <span style={{...S.colName, fontWeight:600}}>Summe</span>
-                <span className="num" style={{...S.colRate, textAlign:"right", color:"#e8a23a", fontWeight:600}}>{fmtEUR(bizTotal)}</span>
-                <span style={S.colDel}></span>
+                <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr auto", gap:8, alignItems:"end" }}>
+                  <Field label="Anzahl Klienten"><input type="number" min="0" step="1" placeholder="z.B. 30" value={p.count||""} onChange={e=>updPeriod(p.id,{count:+e.target.value})} style={S.input}/></Field>
+                  <Field label="Preis / Klient (€)"><input type="number" min="0" step="10" placeholder="z.B. 140" value={p.price||""} onChange={e=>updPeriod(p.id,{price:+e.target.value})} style={S.input}/></Field>
+                  <button onClick={()=>delPeriod(p.id)} style={{...S.btnGhost, paddingBottom:10}}><Trash2 size={16}/></button>
+                </div>
+                <div style={S.periodFoot}>
+                  <span className="num" style={{ color:"#7d8a78", fontSize:12.5 }}>
+                    {p.days} {p.days===1?"Tag":"Tage"} im {MONTHS_DE[selMonth]} · {p.count||0} × {fmtEUR(Number(p.price||0))} anteilig
+                  </span>
+                  <span className="num" style={{ color:"#8fae7a", fontSize:14, fontWeight:600 }}>{fmtEUR(p.amount)}</span>
+                </div>
               </div>
-            </div>
-            <button onClick={addClient} style={S.btnPrimary}><Plus size={16}/> Klient hinzufügen</button>
+            ))}
+            <button onClick={addPeriod} style={S.btnPrimary}><Plus size={16}/> Zeitraum hinzufügen</button>
 
             <div style={{ ...S.card, marginTop:18 }}>
-              <Field label={`Gearbeitete Stunden im ${MONTHS_DE[selMonth]}`}>
-                <input type="number" step="0.5" placeholder="z.B. 50" value={bizHours[mk] ?? ""} onChange={e=>setBHours(e.target.value===""?"":+e.target.value)} style={S.input}/>
-              </Field>
-              <div style={S.calcBox}>
-                <span className="num" style={{ color:"#7d8a78", fontSize:13 }}>{fmtEUR(bizTotal)} ÷ {bHours.toFixed(1)} h</span>
-                <span className="num" style={{ color:"#6f9bd1", fontSize:18, fontWeight:600 }}>{bizRate>0?`${bizRate.toFixed(2)} €/h`:"–"}</span>
+              <div style={S.cardLabel}>Einnahmen · {MONTHS_DE[selMonth]}</div>
+              <div style={{ display:"flex", justifyContent:"space-between", alignItems:"baseline" }}>
+                <span className="num" style={{ color:"#7d8a78", fontSize:13 }}>Summe aller Zeiträume</span>
+                <span className="num" style={{ color:"#e8a23a", fontSize:22, fontWeight:600 }}>{fmtEUR(biz.income)}</span>
               </div>
             </div>
+
+            <div style={S.card}>
+              <div style={S.cardLabel}>Durchschnitts-Stundenlohn · {MONTHS_DE[selMonth]}</div>
+              <div style={{ display:"flex", justifyContent:"space-between", alignItems:"baseline" }}>
+                <span className="num" style={{ color:"#7d8a78", fontSize:13 }}>{fmtEUR(biz.income)} ÷ {biz.hours.toFixed(2)} h</span>
+                <span className="num" style={{ color:"#6f9bd1", fontSize:22, fontWeight:600 }}>{biz.avgRate>0?`${biz.avgRate.toFixed(2)} €/h`:"–"}</span>
+              </div>
+              <div style={{ fontSize:11.5, color:"#5a6356", marginTop:8 }}>Aktualisiert sich automatisch mit jedem eingetragenen Arbeitstag.</div>
+            </div>
+
+            <SubHead text={`Arbeitstage · ${MONTHS_DE[selMonth]}`} />
+            {biz.list.length===0 && <Empty text="Noch keine Stunden eingetragen." />}
+            {biz.list.map(e => <TimeRow key={e.id} e={e} upd={updBE} del={delBE} />)}
+            <button onClick={addBE} style={S.btnAdd}><Plus size={14}/> Arbeitstag eintragen</button>
           </>
         )}
 
@@ -233,7 +306,7 @@ export default function Dashboard() {
             <div style={{ height:12 }}/>
             <AnalysisRow name="Hauptarbeit" hours={mainMonthlyHours} pay={Number(mainSalary||0)} accent="#8fae7a" />
             <AnalysisRow name="Minijob" hours={mini.hours} pay={mini.pay} accent="#6f9bd1" />
-            <AnalysisRow name="Kleingewerbe" hours={bHours} pay={bizTotal} accent="#d4a05c" />
+            <AnalysisRow name="Kleingewerbe" hours={biz.hours} pay={biz.income} accent="#d4a05c" />
             <div style={{ ...S.analysisRow, borderTop:"1px solid #2c342b", marginTop:6, paddingTop:14 }}>
               <div style={{ fontWeight:600 }}>Gesamt</div>
               <div style={{ display:"flex", gap:16, alignItems:"baseline" }}>
@@ -273,16 +346,23 @@ function Stat({ icon:Icon, label, value, accent }) {
 }
 
 function TimeRow({ e, upd, del }) {
+  const wd = weekdayOf(e.date);
+  const h = hoursBetween(e.from, e.to);
   return (
-    <div style={S.timeRow}>
-      <input type="date" value={e.date} onChange={ev=>upd(e.id,{date:ev.target.value})} style={{...S.input, flex:"1 1 130px"}}/>
-      <div style={S.timePair}>
-        <input type="time" value={e.from} onChange={ev=>upd(e.id,{from:ev.target.value})} style={S.inputTime}/>
-        <span style={{ color:"#7d8a78" }}>–</span>
-        <input type="time" value={e.to} onChange={ev=>upd(e.id,{to:ev.target.value})} style={S.inputTime}/>
+    <div style={S.timeCard}>
+      <div style={{ display:"flex", alignItems:"center", gap:8, flexWrap:"wrap" }}>
+        <div style={{ display:"flex", alignItems:"center", gap:6, flex:"1 1 150px" }}>
+          <span style={S.wdBadge}>{wd||"–"}</span>
+          <input type="date" value={e.date} onChange={ev=>upd(e.id,{date:ev.target.value})} style={{...S.input, padding:"7px 8px"}}/>
+        </div>
+        <div style={S.timePair}>
+          <input type="time" value={e.from} onChange={ev=>upd(e.id,{from:ev.target.value})} style={S.inputTime}/>
+          <span style={{ color:"#7d8a78" }}>–</span>
+          <input type="time" value={e.to} onChange={ev=>upd(e.id,{to:ev.target.value})} style={S.inputTime}/>
+        </div>
+        <span className="num" style={S.hChip}>{h.toFixed(2)} h</span>
+        <button onClick={()=>del(e.id)} style={S.btnGhost}><Trash2 size={14}/></button>
       </div>
-      <span className="num" style={S.hChip}>{hoursBetween(e.from,e.to).toFixed(2)}h</span>
-      <button onClick={()=>del(e.id)} style={S.btnGhost}><Trash2 size={13}/></button>
     </div>
   );
 }
@@ -309,8 +389,9 @@ const Card = ({ label, value, accent }) => (
   </div>
 );
 const Field = ({ label, children }) => (<div><div style={{ fontSize:11, color:"#7d8a78", marginBottom:4 }}>{label}</div>{children}</div>);
-const SubHead = ({ text }) => <div style={{ fontSize:12, color:"#7d8a78", margin:"6px 0", textTransform:"uppercase", letterSpacing:0.5 }}>{text}</div>;
+const SubHead = ({ text }) => <div style={{ fontSize:12, color:"#7d8a78", margin:"6px 0 10px", textTransform:"uppercase", letterSpacing:0.5 }}>{text}</div>;
 const SectionHint = ({ text }) => <div style={{ fontSize:12.5, color:"#7d8a78", marginBottom:14, lineHeight:1.5 }}>{text}</div>;
+const Empty = ({ text }) => <div style={{ color:"#7d8a78", fontSize:13, padding:"6px 0 12px" }}>{text}</div>;
 
 const CSS = `
 @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=Fraunces:opsz,wght@9..144,500;9..144,700&display=swap');
@@ -330,32 +411,26 @@ const S = {
   header: { padding:"26px 20px 16px", borderBottom:"1px solid #232a23", maxWidth:760, margin:"0 auto" },
   logo: { fontSize:28, fontWeight:700, color:"#e8a23a" },
   tagline: { fontSize:12.5, color:"#7d8a78", letterSpacing:0.3 },
+  headerSummary: { display:"flex", gap:10, alignItems:"center", marginTop:14, fontSize:14, color:"#e8a23a", flexWrap:"wrap" },
   select: { background:"#1a201a", color:"#e8e3d8", border:"1px solid #2c342b", borderRadius:8, padding:"8px 10px", fontSize:14 },
   tabs: { display:"flex", gap:2, padding:"12px 14px 0", borderBottom:"1px solid #232a23", maxWidth:760, margin:"0 auto", overflowX:"auto" },
   tab: { display:"flex", alignItems:"center", gap:6, background:"transparent", border:"none", color:"#7d8a78", padding:"10px 12px", fontSize:14, fontWeight:500, cursor:"pointer", borderBottom:"2px solid transparent", marginBottom:-1, whiteSpace:"nowrap" },
   tabActive: { color:"#e8a23a", borderBottom:"2px solid #e8a23a" },
   main: { padding:"20px", maxWidth:760, margin:"0 auto" },
-  statStrip: { display:"grid", gridTemplateColumns:"1fr 1fr 1fr 1fr", gap:8, marginBottom:18 },
+  statStrip: { display:"grid", gridTemplateColumns:"repeat(auto-fit, minmax(0, 1fr))", gap:8, marginBottom:16 },
   stat: { background:"#161c15", border:"1px solid #232a23", borderRadius:12, padding:"12px 10px", display:"flex", flexDirection:"column" },
-  tableWrap: { background:"#161c15", border:"1px solid #232a23", borderRadius:12, overflow:"hidden", marginBottom:14 },
-  trow: { display:"flex", alignItems:"center", gap:8, padding:"6px 12px", borderBottom:"1px solid #1d231c" },
-  thead: { background:"#12170f", padding:"9px 12px" },
-  tfoot: { background:"#12170f", borderBottom:"none" },
-  colName: { flex:"1 1 auto", fontSize:13, color:"#7d8a78" },
-  colRate: { flex:"0 0 110px", fontSize:13, color:"#7d8a78", textAlign:"right" },
-  colDel: { flex:"0 0 30px", display:"flex", justifyContent:"center" },
-  cellInput: { background:"transparent", border:"none", color:"#e8e3d8", fontSize:14, padding:"8px 4px", minWidth:0 },
   card: { background:"#161c15", border:"1px solid #232a23", borderRadius:12, padding:16, marginBottom:14 },
-  cardLabel: { fontSize:11.5, color:"#7d8a78", marginBottom:6, textTransform:"uppercase", letterSpacing:0.5 },
-  calcBox: { display:"flex", justifyContent:"space-between", alignItems:"center", marginTop:12, padding:"12px 14px", background:"#12170f", borderRadius:10, border:"1px solid #232a23" },
+  cardLabel: { fontSize:11.5, color:"#7d8a78", marginBottom:8, textTransform:"uppercase", letterSpacing:0.5 },
+  periodFoot: { display:"flex", justifyContent:"space-between", alignItems:"center", marginTop:12, paddingTop:10, borderTop:"1px solid #1d231c", gap:8, flexWrap:"wrap" },
   grid2: { display:"grid", gridTemplateColumns:"1fr 1fr", gap:10 },
   input: { width:"100%", background:"#1a201a", border:"1px solid #2c342b", borderRadius:8, padding:"10px 10px", color:"#e8e3d8", fontSize:14, minWidth:0 },
   inputTime: { background:"#1a201a", border:"1px solid #2c342b", borderRadius:8, padding:"8px 6px", color:"#e8e3d8", fontSize:13.5, width:"auto" },
-  timeRow: { display:"flex", gap:6, marginBottom:6, alignItems:"center", flexWrap:"wrap" },
-  timePair: { display:"flex", gap:5, alignItems:"center", flex:"1 1 auto" },
-  hChip: { fontSize:12, color:"#8fae7a", background:"#1a201a", border:"1px solid #2c342b", borderRadius:6, padding:"4px 7px", whiteSpace:"nowrap" },
+  timeCard: { background:"#161c15", border:"1px solid #232a23", borderRadius:10, padding:"10px 12px", marginBottom:8 },
+  timePair: { display:"flex", gap:5, alignItems:"center" },
+  wdBadge: { fontSize:12, fontWeight:600, color:"#8fae7a", background:"#12170f", border:"1px solid #2c342b", borderRadius:6, padding:"6px 8px", minWidth:34, textAlign:"center" },
+  hChip: { fontSize:12, color:"#8fae7a", background:"#1a201a", border:"1px solid #2c342b", borderRadius:6, padding:"5px 8px", whiteSpace:"nowrap" },
   btnGhost: { background:"transparent", border:"none", color:"#7d8a78", cursor:"pointer", padding:6 },
-  btnAdd: { display:"flex", alignItems:"center", gap:6, background:"#1a201a", border:"1px dashed #3a4339", borderRadius:8, padding:"9px 12px", color:"#cfd6c8", fontSize:13, cursor:"pointer", width:"100%", justifyContent:"center", marginTop:4 },
+  btnAdd: { display:"flex", alignItems:"center", gap:6, background:"#1a201a", border:"1px dashed #3a4339", borderRadius:8, padding:"10px 12px", color:"#cfd6c8", fontSize:13, cursor:"pointer", width:"100%", justifyContent:"center", marginTop:4 },
   btnPrimary: { display:"flex", alignItems:"center", gap:6, background:"#e8a23a", border:"none", borderRadius:10, padding:"13px 16px", color:"#1a1208", fontSize:14, fontWeight:600, cursor:"pointer", width:"100%", justifyContent:"center" },
   barTrack: { height:6, background:"#232a23", borderRadius:4, marginTop:8, overflow:"hidden" },
   barFill: { height:"100%" },
