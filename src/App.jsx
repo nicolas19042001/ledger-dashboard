@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo, useRef } from "react";
-import { Plus, Trash2, TrendingUp, AlertTriangle, Briefcase, Building2, Store, Users, Euro, Clock, LogOut } from "lucide-react";
+import { Plus, Trash2, TrendingUp, AlertTriangle, Briefcase, Building2, Store, Users, Euro, Clock, LogOut, ChevronLeft, Receipt, Wallet } from "lucide-react";
 import { supabase } from "./supabaseClient.js";
 
 const MONTHS_DE = ["Januar","Februar","März","April","Mai","Juni","Juli","August","September","Oktober","November","Dezember"];
@@ -11,6 +11,8 @@ function fmtEUR(n) { return new Intl.NumberFormat("de-DE", { style: "currency", 
 function monthKey(y, m) { return `${y}-${String(m + 1).padStart(2, "0")}`; }
 function daysInMonth(y, m) { return new Date(y, m + 1, 0).getDate(); }
 function todayStr() { return new Date().toISOString().slice(0,10); }
+function parseNum(v){ if(typeof v==="number") return v; const n=parseFloat(String(v).replace(",", ".")); return isNaN(n)?0:n; }
+function numForEdit(n){ if(n===0||n==null||n==="") return ""; return String(n).replace(".", ","); }
 function hoursBetween(from, to) {
   if (!from || !to) return 0;
   const [fh, fm] = from.split(":").map(Number);
@@ -42,16 +44,32 @@ function dateInRange(ref, from, to) {
   return from <= ref && ref <= to;
 }
 
+// Dezimal-Eingabe, die auch Komma akzeptiert (z.B. 15,5)
+function MoneyInput({ value, onCommit, style, placeholder, ...rest }) {
+  const [buf, setBuf] = useState(() => numForEdit(value));
+  const focused = useRef(false);
+  useEffect(() => { if (!focused.current) setBuf(numForEdit(value)); }, [value]);
+  return (
+    <input
+      type="text" inputMode="decimal" placeholder={placeholder} style={style} value={buf}
+      onFocus={() => { focused.current = true; }}
+      onChange={e => {
+        const v = e.target.value;
+        if (/^[0-9]*[.,]?[0-9]*$/.test(v)) { setBuf(v); onCommit(parseNum(v)); }
+      }}
+      onBlur={() => { focused.current = false; setBuf(numForEdit(value)); }}
+      {...rest}
+    />
+  );
+}
+
 // ====================== AUTH-GATE ======================
 export default function App() {
   const [session, setSession] = useState(null);
   const [authReady, setAuthReady] = useState(false);
 
   useEffect(() => {
-    supabase.auth.getSession().then(({ data }) => {
-      setSession(data.session);
-      setAuthReady(true);
-    });
+    supabase.auth.getSession().then(({ data }) => { setSession(data.session); setAuthReady(true); });
     const { data: sub } = supabase.auth.onAuthStateChange((_e, s) => setSession(s));
     return () => sub.subscription.unsubscribe();
   }, []);
@@ -62,7 +80,7 @@ export default function App() {
 }
 
 function AuthScreen() {
-  const [mode, setMode] = useState("signin"); // signin | signup
+  const [mode, setMode] = useState("signin");
   const [email, setEmail] = useState("");
   const [pw, setPw] = useState("");
   const [msg, setMsg] = useState("");
@@ -80,11 +98,8 @@ function AuthScreen() {
         const { error } = await supabase.auth.signInWithPassword({ email, password: pw });
         if (error) throw error;
       }
-    } catch (e) {
-      setMsg(e.message || "Es ist ein Fehler aufgetreten.");
-    } finally {
-      setBusy(false);
-    }
+    } catch (e) { setMsg(e.message || "Es ist ein Fehler aufgetreten."); }
+    finally { setBusy(false); }
   }
 
   return (
@@ -96,20 +111,15 @@ function AuthScreen() {
           {mode === "signin" ? "Melde dich an, um auf deine Daten zuzugreifen." : "Erstelle ein Konto für deine Daten."}
         </div>
         <div style={S.card}>
-          <Field label="E-Mail">
-            <input type="email" value={email} onChange={e=>setEmail(e.target.value)} style={S.input} autoComplete="email"/>
-          </Field>
+          <Field label="E-Mail"><input type="email" value={email} onChange={e=>setEmail(e.target.value)} style={S.input} autoComplete="email"/></Field>
           <div style={{ height: 10 }}/>
-          <Field label="Passwort">
-            <input type="password" value={pw} onChange={e=>setPw(e.target.value)} style={S.input} autoComplete={mode==="signup"?"new-password":"current-password"}/>
-          </Field>
+          <Field label="Passwort"><input type="password" value={pw} onChange={e=>setPw(e.target.value)} style={S.input} autoComplete={mode==="signup"?"new-password":"current-password"}/></Field>
           <button onClick={submit} disabled={busy} style={{ ...S.btnPrimary, marginTop: 16, opacity: busy?0.6:1 }}>
             {busy ? "Bitte warten…" : (mode === "signin" ? "Anmelden" : "Konto erstellen")}
           </button>
           {msg && <div style={{ marginTop: 12, fontSize: 12.5, color: "#d4b95c" }}>{msg}</div>}
         </div>
-        <button
-          onClick={()=>{ setMode(mode==="signin"?"signup":"signin"); setMsg(""); }}
+        <button onClick={()=>{ setMode(mode==="signin"?"signup":"signin"); setMsg(""); }}
           style={{ background:"none", border:"none", color:"#6f9bd1", fontSize:13, cursor:"pointer", marginTop:14, padding:0 }}>
           {mode === "signin" ? "Noch kein Konto? Jetzt erstellen" : "Schon ein Konto? Anmelden"}
         </button>
@@ -129,21 +139,17 @@ function Dashboard({ session }) {
   const [minijobEntries, setMinijobEntries] = useState([]);
   const [bizPeriods, setBizPeriods] = useState([]);
   const [bizEntries, setBizEntries] = useState([]);
+  const [expenses, setExpenses] = useState([]); // {id,date,desc,qty,price}
 
-  const [view, setView] = useState("haupt");
+  const [view, setView] = useState("home");
   const [now] = useState(new Date());
   const [selMonth, setSelMonth] = useState(now.getMonth());
   const [selYear, setSelYear] = useState(now.getFullYear());
 
-  // ---- Laden aus Supabase ----
   useEffect(() => {
     let active = true;
     (async () => {
-      const { data, error } = await supabase
-        .from("user_state")
-        .select("data")
-        .eq("user_id", session.user.id)
-        .maybeSingle();
+      const { data, error } = await supabase.from("user_state").select("data").eq("user_id", session.user.id).maybeSingle();
       if (active && !error && data && data.data) {
         const d = data.data;
         if (d.mainSalary != null) setMainSalary(d.mainSalary);
@@ -152,31 +158,30 @@ function Dashboard({ session }) {
         if (Array.isArray(d.minijobEntries)) setMinijobEntries(d.minijobEntries);
         if (Array.isArray(d.bizPeriods)) setBizPeriods(d.bizPeriods);
         if (Array.isArray(d.bizEntries)) setBizEntries(d.bizEntries);
+        if (Array.isArray(d.expenses)) setExpenses(d.expenses);
       }
       if (active) setHydrated(true);
     })();
     return () => { active = false; };
   }, [session.user.id]);
 
-  // ---- Speichern nach Supabase (gebündelt) ----
   const saveTimer = useRef(null);
   useEffect(() => {
     if (!hydrated) return;
-    const payload = { mainSalary, mainWeeklyHours, minijobRate, minijobEntries, bizPeriods, bizEntries };
+    const payload = { mainSalary, mainWeeklyHours, minijobRate, minijobEntries, bizPeriods, bizEntries, expenses };
     if (saveTimer.current) clearTimeout(saveTimer.current);
     setSaving(true);
     saveTimer.current = setTimeout(async () => {
-      await supabase.from("user_state").upsert({
-        user_id: session.user.id,
-        data: payload,
-        updated_at: new Date().toISOString(),
-      });
+      await supabase.from("user_state").upsert({ user_id: session.user.id, data: payload, updated_at: new Date().toISOString() });
       setSaving(false);
     }, 800);
     return () => { if (saveTimer.current) clearTimeout(saveTimer.current); };
-  }, [hydrated, mainSalary, mainWeeklyHours, minijobRate, minijobEntries, bizPeriods, bizEntries, session.user.id]);
+  }, [hydrated, mainSalary, mainWeeklyHours, minijobRate, minijobEntries, bizPeriods, bizEntries, expenses, session.user.id]);
 
   const mk = monthKey(selYear, selMonth);
+  const isCurrentMonth = selYear === now.getFullYear() && selMonth === now.getMonth();
+  const newEntryDate = () => isCurrentMonth ? todayStr() : `${mk}-01`;
+
   const mainMonthlyHours = Number(mainWeeklyHours || 0) * 4.33;
   const mainRate = mainMonthlyHours > 0 ? Number(mainSalary || 0) / mainMonthlyHours : 0;
 
@@ -194,7 +199,6 @@ function Dashboard({ session }) {
       return { ...p, days, dim, amount };
     });
     const income = periodsInMonth.reduce((s,p) => s + p.amount, 0);
-    const isCurrentMonth = selYear === now.getFullYear() && selMonth === now.getMonth();
     const ref = isCurrentMonth ? todayStr() : `${mk}-${String(daysInMonth(selYear,selMonth)).padStart(2,"0")}`;
     const activeP = bizPeriods.find(p => dateInRange(ref, p.from, p.to));
     const currentCount = activeP ? Number(activeP.count||0) : 0;
@@ -202,10 +206,17 @@ function Dashboard({ session }) {
     const hours = list.reduce((s,e) => s + hoursBetween(e.from, e.to), 0);
     const avgRate = hours > 0 ? income / hours : 0;
     return { periodsInMonth, income, currentCount, list, hours, avgRate };
-  }, [bizPeriods, bizEntries, selYear, selMonth, mk, now]);
+  }, [bizPeriods, bizEntries, selYear, selMonth, mk, isCurrentMonth]);
+
+  const exp = useMemo(() => {
+    const list = expenses.filter(e => e.date.slice(0,7) === mk).sort((a,b)=>b.date.localeCompare(a.date));
+    const total = list.reduce((s,e) => s + Number(e.qty||0) * Number(e.price||0), 0);
+    return { list, total };
+  }, [expenses, mk]);
 
   const grandPay = Number(mainSalary||0) + mini.pay + biz.income;
   const grandHours = mainMonthlyHours + mini.hours + biz.hours;
+  const net = grandPay - exp.total;
 
   const history = useMemo(() => {
     const out = [];
@@ -224,10 +235,11 @@ function Dashboard({ session }) {
   }, [mainSalary, minijobEntries, minijobRate, bizPeriods, selMonth, selYear]);
   const maxHist = Math.max(1, ...history.map(h => h.total));
 
-  const addME = () => setMinijobEntries([{ id:uid(), date:todayStr(), from:"09:00", to:"13:00" }, ...minijobEntries]);
+  // mutators
+  const addME = () => setMinijobEntries([{ id:uid(), date:newEntryDate(), from:"09:00", to:"13:00" }, ...minijobEntries]);
   const updME = (id,p) => setMinijobEntries(minijobEntries.map(e=>e.id===id?{...e,...p}:e));
   const delME = (id) => setMinijobEntries(minijobEntries.filter(e=>e.id!==id));
-  const addBE = () => setBizEntries([{ id:uid(), date:todayStr(), from:"09:00", to:"11:00" }, ...bizEntries]);
+  const addBE = () => setBizEntries([{ id:uid(), date:newEntryDate(), from:"09:00", to:"11:00" }, ...bizEntries]);
   const updBE = (id,p) => setBizEntries(bizEntries.map(e=>e.id===id?{...e,...p}:e));
   const delBE = (id) => setBizEntries(bizEntries.filter(e=>e.id!==id));
   const addPeriod = () => {
@@ -236,8 +248,19 @@ function Dashboard({ session }) {
   };
   const updPeriod = (id,p) => setBizPeriods(bizPeriods.map(x=>x.id===id?{...x,...p}:x));
   const delPeriod = (id) => setBizPeriods(bizPeriods.filter(x=>x.id!==id));
+  const addExp = () => setExpenses([{ id:uid(), date:newEntryDate(), desc:"", qty:1, price:0 }, ...expenses]);
+  const updExp = (id,p) => setExpenses(expenses.map(e=>e.id===id?{...e,...p}:e));
+  const delExp = (id) => setExpenses(expenses.filter(e=>e.id!==id));
 
   if (!hydrated) return <div style={S.loading}><style>{CSS}</style>Lade deine Daten…</div>;
+
+  const TILES = [
+    { id:"haupt", label:"Hauptarbeit", icon:Building2, accent:"#8fae7a", value:fmtEUR(Number(mainSalary||0)), sub:"Festgehalt" },
+    { id:"minijob", label:"Minijob", icon:Briefcase, accent:"#6f9bd1", value:fmtEUR(mini.pay), sub:`${mini.hours.toFixed(1)} h` },
+    { id:"gewerbe", label:"Kleingewerbe", icon:Store, accent:"#e8a23a", value:fmtEUR(biz.income), sub:`${biz.currentCount} Klienten` },
+    { id:"ausgaben", label:"Ausgaben", icon:Receipt, accent:"#e07a5f", value:fmtEUR(exp.total), sub:`${exp.list.length} Posten` },
+    { id:"analyse", label:"Auswertung", icon:TrendingUp, accent:"#d4a05c", value:fmtEUR(net), sub:"übrig" },
+  ];
 
   return (
     <div style={S.app}>
@@ -246,47 +269,62 @@ function Dashboard({ session }) {
       <header style={S.header}>
         <div style={{ display:"flex", alignItems:"baseline", gap:10, flexWrap:"wrap" }}>
           <span className="display" style={S.logo}>Ledger</span>
-          <span style={S.tagline}>Hauptjob · Minijob · Kleingewerbe</span>
+          <span style={S.tagline}>Einnahmen & Ausgaben</span>
           <button onClick={()=>supabase.auth.signOut()} style={S.signout} title="Abmelden"><LogOut size={13}/> Abmelden</button>
         </div>
-        <div style={{ display:"flex", gap:8, marginTop:16 }}>
+        <div style={{ display:"flex", gap:8, marginTop:16, alignItems:"center" }}>
           <select value={selMonth} onChange={e=>setSelMonth(+e.target.value)} style={S.select}>
             {MONTHS_DE.map((m,i)=><option key={i} value={i}>{m}</option>)}
           </select>
           <select value={selYear} onChange={e=>setSelYear(+e.target.value)} style={S.select}>
             {[now.getFullYear()-1, now.getFullYear(), now.getFullYear()+1].map(y=><option key={y} value={y}>{y}</option>)}
           </select>
-        </div>
-        <div style={S.headerSummary}>
-          <span className="num">{fmtEUR(grandPay)}</span>
-          <span style={{ color:"#5a6356" }}>·</span>
-          <span className="num" style={{ color:"#7d8a78" }}>{grandHours.toFixed(1)} h</span>
-          <span style={{ color:"#5a6356" }}>·</span>
-          <span className="num" style={{ color:"#7d8a78" }}>{grandHours>0?`${(grandPay/grandHours).toFixed(2)} €/h`:"–"}</span>
           <span style={{ color:"#5a6356", marginLeft:"auto", fontSize:11 }}>{saving?"speichert…":"gespeichert"}</span>
         </div>
       </header>
 
-      <nav style={S.tabs}>
-        {[
-          {id:"haupt", label:"Hauptarbeit", icon:Building2},
-          {id:"minijob", label:"Minijob", icon:Briefcase},
-          {id:"gewerbe", label:"Kleingewerbe", icon:Store},
-          {id:"analyse", label:"Auswertung", icon:TrendingUp},
-        ].map(t => {
-          const Icon = t.icon, active = view===t.id;
-          return (
-            <button key={t.id} onClick={()=>setView(t.id)} style={{...S.tab, ...(active?S.tabActive:{})}}>
-              <Icon size={15}/> <span className="tablabel">{t.label}</span>
-            </button>
-          );
-        })}
-      </nav>
-
       <main style={S.main}>
+
+        {view === "home" && (
+          <>
+            <div style={S.netCard}>
+              <div>
+                <div style={{ fontSize:11.5, color:"#7d8a78", textTransform:"uppercase", letterSpacing:0.5 }}>Übrig im {MONTHS_DE[selMonth]}</div>
+                <div className="num" style={{ fontSize:30, fontWeight:700, color: net>=0?"#8fae7a":"#e07a5f", marginTop:4 }}>{fmtEUR(net)}</div>
+              </div>
+              <div style={{ textAlign:"right", fontSize:12 }}>
+                <div className="num" style={{ color:"#e8a23a" }}>+ {fmtEUR(grandPay)}</div>
+                <div className="num" style={{ color:"#e07a5f", marginTop:3 }}>− {fmtEUR(exp.total)}</div>
+              </div>
+            </div>
+
+            <div style={S.tileGrid}>
+              {TILES.map(t => {
+                const Icon = t.icon;
+                return (
+                  <button key={t.id} onClick={()=>setView(t.id)} style={{...S.tile, borderColor:t.accent+"33"}}>
+                    <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between" }}>
+                      <span style={{ ...S.tileIcon, background:t.accent+"22" }}><Icon size={18} color={t.accent}/></span>
+                    </div>
+                    <div style={{ marginTop:14 }}>
+                      <div style={{ fontSize:14, color:"#e8e3d8", fontWeight:600 }}>{t.label}</div>
+                      <div className="num" style={{ fontSize:18, fontWeight:600, color:t.accent, marginTop:4 }}>{t.value}</div>
+                      <div style={{ fontSize:11.5, color:"#7d8a78", marginTop:2 }}>{t.sub}</div>
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+          </>
+        )}
+
+        {view !== "home" && (
+          <button onClick={()=>setView("home")} style={S.back}><ChevronLeft size={16}/> Übersicht</button>
+        )}
 
         {view === "haupt" && (
           <>
+            <SectionTitle icon={Building2} text="Hauptarbeit" accent="#8fae7a" />
             <SectionHint text="Deine Festanstellung: festes Monatsgehalt, unabhängig vom Gewerbe." />
             <div style={S.statStrip}>
               <Stat icon={Euro} label="Gehalt / Monat" value={fmtEUR(Number(mainSalary||0))} accent="#e8a23a" />
@@ -295,12 +333,8 @@ function Dashboard({ session }) {
             </div>
             <div style={S.card}>
               <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:10 }}>
-                <Field label="Festgehalt / Monat (€)">
-                  <input type="number" step="50" placeholder="z.B. 2500" value={mainSalary||""} onChange={e=>setMainSalary(+e.target.value)} style={S.input}/>
-                </Field>
-                <Field label="Stunden / Woche">
-                  <input type="number" step="1" value={mainWeeklyHours||""} onChange={e=>setMainWeeklyHours(+e.target.value)} style={S.input}/>
-                </Field>
+                <Field label="Festgehalt / Monat (€)"><MoneyInput value={mainSalary} onCommit={setMainSalary} placeholder="z.B. 2500" style={S.input}/></Field>
+                <Field label="Stunden / Woche"><MoneyInput value={mainWeeklyHours} onCommit={setMainWeeklyHours} placeholder="z.B. 38" style={S.input}/></Field>
               </div>
               <div style={{ fontSize:11.5, color:"#5a6356", marginTop:10 }}>Monatsstunden grob aus Wochenstunden × 4,33 geschätzt.</div>
             </div>
@@ -309,6 +343,7 @@ function Dashboard({ session }) {
 
         {view === "minijob" && (
           <>
+            <SectionTitle icon={Briefcase} text="Minijob" accent="#6f9bd1" />
             <SectionHint text="Stundenbasierter Nebenjob. Trage einzelne Arbeitstage mit Uhrzeit ein." />
             <div style={S.statStrip}>
               <Stat icon={Euro} label="Verdienst" value={fmtEUR(mini.pay)} accent="#e8a23a" />
@@ -316,8 +351,8 @@ function Dashboard({ session }) {
               <Stat icon={TrendingUp} label="Stundenlohn" value={`${Number(minijobRate||0).toFixed(2)} €/h`} accent="#6f9bd1" />
             </div>
             <div style={S.card}>
-              <Field label="Stundenlohn (€)">
-                <input type="number" value={minijobRate} step="0.5" onChange={e=>setMinijobRate(+e.target.value)} style={S.input}/>
+              <Field label="Stundenlohn (€) – auch Komma möglich, z.B. 15,5">
+                <MoneyInput value={minijobRate} onCommit={setMinijobRate} placeholder="z.B. 15,5" style={S.input}/>
               </Field>
               <div className="num" style={{ marginTop:12, fontSize:13.5, color: mini.over?"#e07a5f":"#6f9bd1" }}>
                 {fmtEUR(mini.pay)} von {fmtEUR(MINIJOB_GRENZE)} Minijob-Grenze
@@ -341,6 +376,7 @@ function Dashboard({ session }) {
 
         {view === "gewerbe" && (
           <>
+            <SectionTitle icon={Store} text="Kleingewerbe" accent="#e8a23a" />
             <SectionHint text="Klienten als Zeiträume erfassen – ändert sich die Anzahl im Monat, lege einfach mehrere Zeiträume an. Beträge werden anteilig nach Tagen berechnet." />
             <div style={S.statStrip}>
               <Stat icon={Users} label="Aktuelle Klienten" value={`${biz.currentCount}`} accent="#8fae7a" />
@@ -358,8 +394,8 @@ function Dashboard({ session }) {
                   <Field label="Bis"><input type="date" value={p.to} onChange={e=>updPeriod(p.id,{to:e.target.value})} style={S.input}/></Field>
                 </div>
                 <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr auto", gap:8, alignItems:"end" }}>
-                  <Field label="Anzahl Klienten"><input type="number" min="0" step="1" placeholder="z.B. 30" value={p.count||""} onChange={e=>updPeriod(p.id,{count:+e.target.value})} style={S.input}/></Field>
-                  <Field label="Preis / Klient (€)"><input type="number" min="0" step="10" placeholder="z.B. 140" value={p.price||""} onChange={e=>updPeriod(p.id,{price:+e.target.value})} style={S.input}/></Field>
+                  <Field label="Anzahl Klienten"><input type="number" inputMode="numeric" min="0" step="1" placeholder="z.B. 30" value={p.count||""} onChange={e=>updPeriod(p.id,{count:parseNum(e.target.value)})} style={S.input}/></Field>
+                  <Field label="Preis / Klient (€)"><MoneyInput value={p.price} onCommit={v=>updPeriod(p.id,{price:v})} placeholder="z.B. 140" style={S.input}/></Field>
                   <button onClick={()=>delPeriod(p.id)} style={{...S.btnGhost, paddingBottom:10}}><Trash2 size={16}/></button>
                 </div>
                 <div style={S.periodFoot}>
@@ -396,22 +432,66 @@ function Dashboard({ session }) {
           </>
         )}
 
+        {view === "ausgaben" && (
+          <>
+            <SectionTitle icon={Receipt} text="Ausgaben" accent="#e07a5f" />
+            <SectionHint text="Monatliche Ausgaben. Pro Posten Menge × Einzelpreis – für normale Ausgaben Menge 1, für z.B. Bügelwäsche die Anzahl eintragen." />
+            <div style={S.statStrip}>
+              <Stat icon={Receipt} label="Ausgaben" value={fmtEUR(exp.total)} accent="#e07a5f" />
+              <Stat icon={Wallet} label="Posten" value={`${exp.list.length}`} accent="#cfd6c8" />
+              <Stat icon={TrendingUp} label="Übrig" value={fmtEUR(net)} accent={net>=0?"#8fae7a":"#e07a5f"} />
+            </div>
+
+            <SubHead text={`Posten · ${MONTHS_DE[selMonth]}`} />
+            {exp.list.length===0 && <Empty text="Noch keine Ausgaben eingetragen." />}
+            {exp.list.map(e => (
+              <div key={e.id} style={S.card}>
+                <div style={{ display:"flex", gap:8, marginBottom:8 }}>
+                  <input placeholder="Beschreibung (z.B. Bügelwäsche, Miete)" value={e.desc} onChange={ev=>updExp(e.id,{desc:ev.target.value})} style={{...S.input, flex:1}}/>
+                  <button onClick={()=>delExp(e.id)} style={S.btnGhost}><Trash2 size={15}/></button>
+                </div>
+                <div style={{ display:"grid", gridTemplateColumns:"1.3fr 1fr 1fr", gap:8 }}>
+                  <Field label="Datum"><input type="date" value={e.date} onChange={ev=>updExp(e.id,{date:ev.target.value})} style={S.input}/></Field>
+                  <Field label="Menge"><input type="number" inputMode="decimal" min="0" step="1" placeholder="1" value={e.qty??""} onChange={ev=>updExp(e.id,{qty:parseNum(ev.target.value)})} style={S.input}/></Field>
+                  <Field label="Einzelpreis (€)"><MoneyInput value={e.price} onCommit={v=>updExp(e.id,{price:v})} placeholder="z.B. 5" style={S.input}/></Field>
+                </div>
+                <div style={S.periodFoot}>
+                  <span className="num" style={{ color:"#7d8a78", fontSize:12.5 }}>{Number(e.qty||0)} × {fmtEUR(Number(e.price||0))}</span>
+                  <span className="num" style={{ color:"#e07a5f", fontSize:14, fontWeight:600 }}>{fmtEUR(Number(e.qty||0)*Number(e.price||0))}</span>
+                </div>
+              </div>
+            ))}
+            <button onClick={addExp} style={S.btnPrimary}><Plus size={16}/> Ausgabe hinzufügen</button>
+
+            <div style={{ ...S.card, marginTop:18 }}>
+              <div style={S.cardLabel}>Summe Ausgaben · {MONTHS_DE[selMonth]}</div>
+              <div style={{ display:"flex", justifyContent:"space-between", alignItems:"baseline" }}>
+                <span className="num" style={{ color:"#7d8a78", fontSize:13 }}>{exp.list.length} Posten</span>
+                <span className="num" style={{ color:"#e07a5f", fontSize:22, fontWeight:600 }}>{fmtEUR(exp.total)}</span>
+              </div>
+            </div>
+          </>
+        )}
+
         {view === "analyse" && (
           <>
+            <SectionTitle icon={TrendingUp} text="Auswertung" accent="#d4a05c" />
             <div style={S.grid2}>
-              <Card label="Gesamt diesen Monat" value={fmtEUR(grandPay)} accent="#e8a23a" />
-              <Card label="Stunden gesamt" value={`${grandHours.toFixed(1)} h`} accent="#cfd6c8" />
+              <Card label="Einnahmen" value={fmtEUR(grandPay)} accent="#e8a23a" />
+              <Card label="Ausgaben" value={fmtEUR(exp.total)} accent="#e07a5f" />
             </div>
-            <div style={{ height:12 }}/>
+            <div style={{ ...S.netCard, marginTop:12, marginBottom:14 }}>
+              <div style={{ fontSize:11.5, color:"#7d8a78", textTransform:"uppercase", letterSpacing:0.5 }}>Übrig (Einnahmen − Ausgaben)</div>
+              <div className="num" style={{ fontSize:24, fontWeight:700, color: net>=0?"#8fae7a":"#e07a5f" }}>{fmtEUR(net)}</div>
+            </div>
             <AnalysisRow name="Hauptarbeit" hours={mainMonthlyHours} pay={Number(mainSalary||0)} accent="#8fae7a" />
             <AnalysisRow name="Minijob" hours={mini.hours} pay={mini.pay} accent="#6f9bd1" />
             <AnalysisRow name="Kleingewerbe" hours={biz.hours} pay={biz.income} accent="#d4a05c" />
             <div style={{ ...S.analysisRow, borderTop:"1px solid #2c342b", marginTop:6, paddingTop:14 }}>
-              <div style={{ fontWeight:600 }}>Gesamt</div>
+              <div style={{ fontWeight:600 }}>Einnahmen gesamt</div>
               <div style={{ display:"flex", gap:16, alignItems:"baseline" }}>
                 <span className="num" style={{ color:"#7d8a78", fontSize:13 }}>{grandHours.toFixed(1)} h</span>
                 <span className="num" style={{ color:"#e8a23a", fontWeight:600 }}>{fmtEUR(grandPay)}</span>
-                <span className="num" style={{ color:"#cfd6c8", fontSize:13, minWidth:74, textAlign:"right" }}>{grandHours>0?`${(grandPay/grandHours).toFixed(2)} €/h`:"–"}</span>
               </div>
             </div>
 
@@ -429,7 +509,16 @@ function Dashboard({ session }) {
           </>
         )}
       </main>
-      <footer style={S.footer}>Angemeldet als {session.user.email} · Daten werden online gespeichert und auf allen Geräten synchronisiert.</footer>
+      <footer style={S.footer}>Angemeldet als {session.user.email} · Daten online gespeichert & auf allen Geräten synchron.</footer>
+    </div>
+  );
+}
+
+function SectionTitle({ icon:Icon, text, accent }) {
+  return (
+    <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:8 }}>
+      <span style={{ ...S.tileIcon, width:30, height:30, background:accent+"22" }}><Icon size={16} color={accent}/></span>
+      <span className="display" style={{ fontSize:20, fontWeight:700, color:"#e8e3d8" }}>{text}</span>
     </div>
   );
 }
@@ -482,10 +571,7 @@ function AnalysisRow({ name, hours, pay, accent }) {
 }
 
 const Card = ({ label, value, accent }) => (
-  <div style={S.card}>
-    <div style={S.cardLabel}>{label}</div>
-    <div className="num" style={{ fontSize:22, fontWeight:600, color:accent }}>{value}</div>
-  </div>
+  <div style={S.card}><div style={S.cardLabel}>{label}</div><div className="num" style={{ fontSize:22, fontWeight:600, color:accent }}>{value}</div></div>
 );
 const Field = ({ label, children }) => (<div><div style={{ fontSize:11, color:"#7d8a78", marginBottom:4 }}>{label}</div>{children}</div>);
 const SubHead = ({ text }) => <div style={{ fontSize:12, color:"#7d8a78", margin:"6px 0 10px", textTransform:"uppercase", letterSpacing:0.5 }}>{text}</div>;
@@ -502,7 +588,6 @@ input, select { font-family: inherit; }
 input:focus, select:focus { outline: 2px solid #e8a23a; outline-offset: -1px; }
 ::-webkit-scrollbar { height:6px; width:6px; }
 ::-webkit-scrollbar-thumb { background:#3a4339; border-radius:4px; }
-@media (max-width: 480px) { .tablabel { display:none; } }
 `;
 
 const S = {
@@ -512,12 +597,16 @@ const S = {
   logo: { fontSize:28, fontWeight:700, color:"#e8a23a" },
   tagline: { fontSize:12.5, color:"#7d8a78", letterSpacing:0.3 },
   signout: { marginLeft:"auto", display:"flex", alignItems:"center", gap:5, background:"transparent", border:"1px solid #2c342b", color:"#7d8a78", borderRadius:8, padding:"6px 10px", fontSize:12, cursor:"pointer" },
-  headerSummary: { display:"flex", gap:10, alignItems:"center", marginTop:14, fontSize:14, color:"#e8a23a", flexWrap:"wrap" },
   select: { background:"#1a201a", color:"#e8e3d8", border:"1px solid #2c342b", borderRadius:8, padding:"8px 10px", fontSize:14 },
-  tabs: { display:"flex", gap:2, padding:"12px 14px 0", borderBottom:"1px solid #232a23", maxWidth:760, margin:"0 auto", overflowX:"auto" },
-  tab: { display:"flex", alignItems:"center", gap:6, background:"transparent", border:"none", color:"#7d8a78", padding:"10px 12px", fontSize:14, fontWeight:500, cursor:"pointer", borderBottom:"2px solid transparent", marginBottom:-1, whiteSpace:"nowrap" },
-  tabActive: { color:"#e8a23a", borderBottom:"2px solid #e8a23a" },
   main: { padding:"20px", maxWidth:760, margin:"0 auto" },
+
+  netCard: { display:"flex", justifyContent:"space-between", alignItems:"center", background:"linear-gradient(135deg,#161c15,#12170f)", border:"1px solid #232a23", borderRadius:16, padding:"18px 20px", marginBottom:16 },
+  tileGrid: { display:"grid", gridTemplateColumns:"1fr 1fr", gap:12 },
+  tile: { textAlign:"left", background:"#161c15", border:"1px solid #232a23", borderRadius:16, padding:16, cursor:"pointer", color:"#e8e3d8" },
+  tileIcon: { width:36, height:36, borderRadius:10, display:"flex", alignItems:"center", justifyContent:"center" },
+
+  back: { display:"flex", alignItems:"center", gap:4, background:"transparent", border:"none", color:"#7d8a78", fontSize:13.5, cursor:"pointer", padding:"0 0 14px 0" },
+
   statStrip: { display:"grid", gridTemplateColumns:"repeat(auto-fit, minmax(0, 1fr))", gap:8, marginBottom:16 },
   stat: { background:"#161c15", border:"1px solid #232a23", borderRadius:12, padding:"12px 10px", display:"flex", flexDirection:"column" },
   card: { background:"#161c15", border:"1px solid #232a23", borderRadius:12, padding:16, marginBottom:14 },
