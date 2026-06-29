@@ -1,5 +1,6 @@
-import React, { useState, useEffect, useMemo } from "react";
-import { Plus, Trash2, TrendingUp, AlertTriangle, Briefcase, Building2, Store, Users, Euro, Clock } from "lucide-react";
+import React, { useState, useEffect, useMemo, useRef } from "react";
+import { Plus, Trash2, TrendingUp, AlertTriangle, Briefcase, Building2, Store, Users, Euro, Clock, LogOut } from "lucide-react";
+import { supabase } from "./supabaseClient.js";
 
 const MONTHS_DE = ["Januar","Februar","März","April","Mai","Juni","Juli","August","September","Oktober","November","Dezember"];
 const WEEKDAYS_DE = ["So","Mo","Di","Mi","Do","Fr","Sa"];
@@ -23,7 +24,6 @@ function weekdayOf(dateStr) {
   const d = new Date(dateStr + "T00:00:00");
   return WEEKDAYS_DE[d.getDay()] || "";
 }
-// Overlap (in Tagen) eines Datumsbereichs mit dem gewählten Monat
 function overlapDaysInMonth(from, to, y, m) {
   const dim = daysInMonth(y, m);
   if (!from || !to) return { days: 0, dim };
@@ -42,42 +42,144 @@ function dateInRange(ref, from, to) {
   return from <= ref && ref <= to;
 }
 
-function load(key, fallback) {
-  try { const raw = localStorage.getItem(key); return raw != null ? JSON.parse(raw) : fallback; }
-  catch { return fallback; }
-}
-function persist(key, val) { try { localStorage.setItem(key, JSON.stringify(val)); } catch {} }
+// ====================== AUTH-GATE ======================
+export default function App() {
+  const [session, setSession] = useState(null);
+  const [authReady, setAuthReady] = useState(false);
 
-export default function Dashboard() {
-  // Hauptarbeit
-  const [mainSalary, setMainSalary] = useState(() => load("v5_mainSalary", 0));
-  const [mainWeeklyHours, setMainWeeklyHours] = useState(() => load("v5_mainWeeklyHours", 38));
-  // Minijob
-  const [minijobRate, setMinijobRate] = useState(() => load("v5_minijobRate", 13));
-  const [minijobEntries, setMinijobEntries] = useState(() => load("v5_minijobEntries", []));
-  // Kleingewerbe
-  const [bizPeriods, setBizPeriods] = useState(() => load("v6_bizPeriods", [])); // {id,from,to,count,price}
-  const [bizEntries, setBizEntries] = useState(() => load("v5_bizEntries", []));   // {id,date,from,to}
+  useEffect(() => {
+    supabase.auth.getSession().then(({ data }) => {
+      setSession(data.session);
+      setAuthReady(true);
+    });
+    const { data: sub } = supabase.auth.onAuthStateChange((_e, s) => setSession(s));
+    return () => sub.subscription.unsubscribe();
+  }, []);
+
+  if (!authReady) return <div style={S.loading}><style>{CSS}</style>Lade…</div>;
+  if (!session) return <AuthScreen />;
+  return <Dashboard session={session} />;
+}
+
+function AuthScreen() {
+  const [mode, setMode] = useState("signin"); // signin | signup
+  const [email, setEmail] = useState("");
+  const [pw, setPw] = useState("");
+  const [msg, setMsg] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  async function submit() {
+    setMsg(""); setBusy(true);
+    try {
+      if (mode === "signup") {
+        const { error } = await supabase.auth.signUp({ email, password: pw });
+        if (error) throw error;
+        setMsg("Konto erstellt. Du kannst dich jetzt anmelden.");
+        setMode("signin");
+      } else {
+        const { error } = await supabase.auth.signInWithPassword({ email, password: pw });
+        if (error) throw error;
+      }
+    } catch (e) {
+      setMsg(e.message || "Es ist ein Fehler aufgetreten.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div style={S.app}>
+      <style>{CSS}</style>
+      <div style={{ maxWidth: 380, margin: "0 auto", padding: "60px 20px" }}>
+        <div className="display" style={{ ...S.logo, fontSize: 32, marginBottom: 6 }}>Ledger</div>
+        <div style={{ color: "#7d8a78", fontSize: 13, marginBottom: 28 }}>
+          {mode === "signin" ? "Melde dich an, um auf deine Daten zuzugreifen." : "Erstelle ein Konto für deine Daten."}
+        </div>
+        <div style={S.card}>
+          <Field label="E-Mail">
+            <input type="email" value={email} onChange={e=>setEmail(e.target.value)} style={S.input} autoComplete="email"/>
+          </Field>
+          <div style={{ height: 10 }}/>
+          <Field label="Passwort">
+            <input type="password" value={pw} onChange={e=>setPw(e.target.value)} style={S.input} autoComplete={mode==="signup"?"new-password":"current-password"}/>
+          </Field>
+          <button onClick={submit} disabled={busy} style={{ ...S.btnPrimary, marginTop: 16, opacity: busy?0.6:1 }}>
+            {busy ? "Bitte warten…" : (mode === "signin" ? "Anmelden" : "Konto erstellen")}
+          </button>
+          {msg && <div style={{ marginTop: 12, fontSize: 12.5, color: "#d4b95c" }}>{msg}</div>}
+        </div>
+        <button
+          onClick={()=>{ setMode(mode==="signin"?"signup":"signin"); setMsg(""); }}
+          style={{ background:"none", border:"none", color:"#6f9bd1", fontSize:13, cursor:"pointer", marginTop:14, padding:0 }}>
+          {mode === "signin" ? "Noch kein Konto? Jetzt erstellen" : "Schon ein Konto? Anmelden"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ====================== DASHBOARD ======================
+function Dashboard({ session }) {
+  const [hydrated, setHydrated] = useState(false);
+  const [saving, setSaving] = useState(false);
+
+  const [mainSalary, setMainSalary] = useState(0);
+  const [mainWeeklyHours, setMainWeeklyHours] = useState(38);
+  const [minijobRate, setMinijobRate] = useState(13);
+  const [minijobEntries, setMinijobEntries] = useState([]);
+  const [bizPeriods, setBizPeriods] = useState([]);
+  const [bizEntries, setBizEntries] = useState([]);
 
   const [view, setView] = useState("haupt");
   const [now] = useState(new Date());
   const [selMonth, setSelMonth] = useState(now.getMonth());
   const [selYear, setSelYear] = useState(now.getFullYear());
 
-  useEffect(() => persist("v5_mainSalary", mainSalary), [mainSalary]);
-  useEffect(() => persist("v5_mainWeeklyHours", mainWeeklyHours), [mainWeeklyHours]);
-  useEffect(() => persist("v5_minijobRate", minijobRate), [minijobRate]);
-  useEffect(() => persist("v5_minijobEntries", minijobEntries), [minijobEntries]);
-  useEffect(() => persist("v6_bizPeriods", bizPeriods), [bizPeriods]);
-  useEffect(() => persist("v5_bizEntries", bizEntries), [bizEntries]);
+  // ---- Laden aus Supabase ----
+  useEffect(() => {
+    let active = true;
+    (async () => {
+      const { data, error } = await supabase
+        .from("user_state")
+        .select("data")
+        .eq("user_id", session.user.id)
+        .maybeSingle();
+      if (active && !error && data && data.data) {
+        const d = data.data;
+        if (d.mainSalary != null) setMainSalary(d.mainSalary);
+        if (d.mainWeeklyHours != null) setMainWeeklyHours(d.mainWeeklyHours);
+        if (d.minijobRate != null) setMinijobRate(d.minijobRate);
+        if (Array.isArray(d.minijobEntries)) setMinijobEntries(d.minijobEntries);
+        if (Array.isArray(d.bizPeriods)) setBizPeriods(d.bizPeriods);
+        if (Array.isArray(d.bizEntries)) setBizEntries(d.bizEntries);
+      }
+      if (active) setHydrated(true);
+    })();
+    return () => { active = false; };
+  }, [session.user.id]);
+
+  // ---- Speichern nach Supabase (gebündelt) ----
+  const saveTimer = useRef(null);
+  useEffect(() => {
+    if (!hydrated) return;
+    const payload = { mainSalary, mainWeeklyHours, minijobRate, minijobEntries, bizPeriods, bizEntries };
+    if (saveTimer.current) clearTimeout(saveTimer.current);
+    setSaving(true);
+    saveTimer.current = setTimeout(async () => {
+      await supabase.from("user_state").upsert({
+        user_id: session.user.id,
+        data: payload,
+        updated_at: new Date().toISOString(),
+      });
+      setSaving(false);
+    }, 800);
+    return () => { if (saveTimer.current) clearTimeout(saveTimer.current); };
+  }, [hydrated, mainSalary, mainWeeklyHours, minijobRate, minijobEntries, bizPeriods, bizEntries, session.user.id]);
 
   const mk = monthKey(selYear, selMonth);
-
-  // Hauptarbeit
   const mainMonthlyHours = Number(mainWeeklyHours || 0) * 4.33;
   const mainRate = mainMonthlyHours > 0 ? Number(mainSalary || 0) / mainMonthlyHours : 0;
 
-  // Minijob
   const mini = useMemo(() => {
     const list = minijobEntries.filter(e => e.date.slice(0,7) === mk).sort((a,b)=>b.date.localeCompare(a.date));
     const hours = list.reduce((s,e) => s + hoursBetween(e.from, e.to), 0);
@@ -85,26 +187,20 @@ export default function Dashboard() {
     return { list, hours, pay, over: pay > MINIJOB_GRENZE, near: pay > MINIJOB_GRENZE*0.85 && pay <= MINIJOB_GRENZE };
   }, [minijobEntries, minijobRate, mk]);
 
-  // Kleingewerbe
   const biz = useMemo(() => {
-    // Zeiträume, die in den gewählten Monat fallen, mit anteiligem Betrag
     const periodsInMonth = bizPeriods.map(p => {
       const { days, dim } = overlapDaysInMonth(p.from, p.to, selYear, selMonth);
       const amount = Number(p.count||0) * Number(p.price||0) * (dim>0 ? days/dim : 0);
       return { ...p, days, dim, amount };
     });
     const income = periodsInMonth.reduce((s,p) => s + p.amount, 0);
-
-    // "Aktuelle" Klienten: Zeitraum, der das Referenzdatum enthält
     const isCurrentMonth = selYear === now.getFullYear() && selMonth === now.getMonth();
     const ref = isCurrentMonth ? todayStr() : `${mk}-${String(daysInMonth(selYear,selMonth)).padStart(2,"0")}`;
     const activeP = bizPeriods.find(p => dateInRange(ref, p.from, p.to));
     const currentCount = activeP ? Number(activeP.count||0) : 0;
-
     const list = bizEntries.filter(e => e.date.slice(0,7) === mk).sort((a,b)=>b.date.localeCompare(a.date));
     const hours = list.reduce((s,e) => s + hoursBetween(e.from, e.to), 0);
     const avgRate = hours > 0 ? income / hours : 0;
-
     return { periodsInMonth, income, currentCount, list, hours, avgRate };
   }, [bizPeriods, bizEntries, selYear, selMonth, mk, now]);
 
@@ -128,7 +224,6 @@ export default function Dashboard() {
   }, [mainSalary, minijobEntries, minijobRate, bizPeriods, selMonth, selYear]);
   const maxHist = Math.max(1, ...history.map(h => h.total));
 
-  // mutators
   const addME = () => setMinijobEntries([{ id:uid(), date:todayStr(), from:"09:00", to:"13:00" }, ...minijobEntries]);
   const updME = (id,p) => setMinijobEntries(minijobEntries.map(e=>e.id===id?{...e,...p}:e));
   const delME = (id) => setMinijobEntries(minijobEntries.filter(e=>e.id!==id));
@@ -142,6 +237,8 @@ export default function Dashboard() {
   const updPeriod = (id,p) => setBizPeriods(bizPeriods.map(x=>x.id===id?{...x,...p}:x));
   const delPeriod = (id) => setBizPeriods(bizPeriods.filter(x=>x.id!==id));
 
+  if (!hydrated) return <div style={S.loading}><style>{CSS}</style>Lade deine Daten…</div>;
+
   return (
     <div style={S.app}>
       <style>{CSS}</style>
@@ -150,6 +247,7 @@ export default function Dashboard() {
         <div style={{ display:"flex", alignItems:"baseline", gap:10, flexWrap:"wrap" }}>
           <span className="display" style={S.logo}>Ledger</span>
           <span style={S.tagline}>Hauptjob · Minijob · Kleingewerbe</span>
+          <button onClick={()=>supabase.auth.signOut()} style={S.signout} title="Abmelden"><LogOut size={13}/> Abmelden</button>
         </div>
         <div style={{ display:"flex", gap:8, marginTop:16 }}>
           <select value={selMonth} onChange={e=>setSelMonth(+e.target.value)} style={S.select}>
@@ -165,6 +263,7 @@ export default function Dashboard() {
           <span className="num" style={{ color:"#7d8a78" }}>{grandHours.toFixed(1)} h</span>
           <span style={{ color:"#5a6356" }}>·</span>
           <span className="num" style={{ color:"#7d8a78" }}>{grandHours>0?`${(grandPay/grandHours).toFixed(2)} €/h`:"–"}</span>
+          <span style={{ color:"#5a6356", marginLeft:"auto", fontSize:11 }}>{saving?"speichert…":"gespeichert"}</span>
         </div>
       </header>
 
@@ -330,7 +429,7 @@ export default function Dashboard() {
           </>
         )}
       </main>
-      <footer style={S.footer}>Daten werden lokal in deinem Browser gespeichert.</footer>
+      <footer style={S.footer}>Angemeldet als {session.user.email} · Daten werden online gespeichert und auf allen Geräten synchronisiert.</footer>
     </div>
   );
 }
@@ -407,10 +506,12 @@ input:focus, select:focus { outline: 2px solid #e8a23a; outline-offset: -1px; }
 `;
 
 const S = {
+  loading: { minHeight:"100vh", background:"#0f1410", color:"#e8e3d8", display:"flex", alignItems:"center", justifyContent:"center", fontFamily:"'IBM Plex Sans', ui-sans-serif" },
   app: { minHeight:"100vh", background:"#0f1410", color:"#e8e3d8", fontFamily:"'IBM Plex Sans', ui-sans-serif, system-ui" },
   header: { padding:"26px 20px 16px", borderBottom:"1px solid #232a23", maxWidth:760, margin:"0 auto" },
   logo: { fontSize:28, fontWeight:700, color:"#e8a23a" },
   tagline: { fontSize:12.5, color:"#7d8a78", letterSpacing:0.3 },
+  signout: { marginLeft:"auto", display:"flex", alignItems:"center", gap:5, background:"transparent", border:"1px solid #2c342b", color:"#7d8a78", borderRadius:8, padding:"6px 10px", fontSize:12, cursor:"pointer" },
   headerSummary: { display:"flex", gap:10, alignItems:"center", marginTop:14, fontSize:14, color:"#e8a23a", flexWrap:"wrap" },
   select: { background:"#1a201a", color:"#e8e3d8", border:"1px solid #2c342b", borderRadius:8, padding:"8px 10px", fontSize:14 },
   tabs: { display:"flex", gap:2, padding:"12px 14px 0", borderBottom:"1px solid #232a23", maxWidth:760, margin:"0 auto", overflowX:"auto" },
